@@ -52,9 +52,11 @@ final class AesGcmSpi extends CipherSpi {
    *
    * @param ctxPtr Optional Context pointer
    * @param ctxPtrOut Optional out parameter to recieve new context
+   * @param inputDirect Input direct buffer; exactly one of inputDirect and input is non-null
    * @param input Input plaintext to encrypt
    * @param inputOffset Offset within input array of start of plaintext
    * @param inputLength Data length to encrypt
+   * @param resultDirect Result direct buffer; exactly one of resultDirect and result is non-null
    * @param result Result array - must have room for inputLength + tagLen + resultOffset bytes
    * @param resultOffset Offset of start of ciphertext in result array
    * @param tagLen Length of GCM tag
@@ -66,9 +68,11 @@ final class AesGcmSpi extends CipherSpi {
       long ctxPtr,
       boolean sameKey,
       long[] ctxPtrOut,
+      ByteBuffer inputDirect,
       byte[] input,
       int inputOffset,
       int inputLength,
+      ByteBuffer resultDirect,
       byte[] result,
       int resultOffset,
       int tagLen,
@@ -82,9 +86,11 @@ final class AesGcmSpi extends CipherSpi {
    *
    * @param ctxPtr Optional Context pointer
    * @param ctxPtrOut Optional out parameter to recieve new context
+   * @param inputDirect Input direct buffer; exactly one of inputDirect and input is non-null
    * @param input Input plaintext to encrypt
    * @param inoffset Offset within input array of start of plaintext
    * @param inlen Data length to encrypt
+   * @param resultDirect Result direct buffer; exactly one of resultDirect and result is non-null
    * @param result Result array - must have room for inputLength + tagLen + resultOffset bytes
    * @param resultOffset Offset of start of ciphertext in result array
    * @param tagLen Length of GCM tag
@@ -98,9 +104,11 @@ final class AesGcmSpi extends CipherSpi {
       long ctxPtr,
       boolean sameKey,
       long[] ctxPtrOut,
+      ByteBuffer inputDirect,
       byte[] input,
       int inoffset,
       int inlen,
+      ByteBuffer resultDirect,
       byte[] result,
       int resultOffset,
       int tagLen,
@@ -589,54 +597,8 @@ final class AesGcmSpi extends CipherSpi {
         // init(). In this case
         // we make a single native call to perform the encryption operation in one go.
 
-        if (context != null) {
-          return context.use(
-              ptr ->
-                  oneShotEncrypt(
-                      ptr,
-                      sameKey,
-                      null,
-                      finalInput,
-                      inputOffset,
-                      finalInputLength,
-                      output,
-                      finalOutputOffset,
-                      tagLength,
-                      key,
-                      iv));
-        }
-        // We don't have an existing context, however we might want to save one
-        if (saveNativeContext()) {
-          final long[] ptrOut = new long[1];
-          final int outLen =
-              oneShotEncrypt(
-                  0,
-                  false,
-                  ptrOut,
-                  finalInput,
-                  inputOffset,
-                  finalInputLength,
-                  output,
-                  finalOutputOffset,
-                  tagLength,
-                  key,
-                  iv);
-          context = new NativeEvpCipherCtx(ptrOut[0]);
-          return outLen;
-        }
-        // We don't need to save the context.
-        return oneShotEncrypt(
-            0,
-            false,
-            null,
-            finalInput,
-            inputOffset,
-            finalInputLength,
-            output,
-            finalOutputOffset,
-            tagLength,
-            key,
-            iv);
+        return encryptWithContext(
+            null, finalInput, inputOffset, finalInputLength, null, output, finalOutputOffset);
       }
       // Context is initialized, which means either updateAAD or update has been invoked after init
 
@@ -717,78 +679,14 @@ final class AesGcmSpi extends CipherSpi {
         workingInputOffset = 0;
       }
 
-      if (workingInputLength < tagLength) {
-        throw new AEADBadTagException("Input too short - need tag");
-      }
-
-      if (context != null) {
-        // We already have a context, so let's reuse it.
-        return context.use(
-            ptr ->
-                oneShotDecrypt(
-                    ptr,
-                    sameKey,
-                    null,
-                    workingInputArray,
-                    workingInputOffset,
-                    workingInputLength,
-                    output,
-                    outputOffset,
-                    tagLength,
-                    key,
-                    iv,
-                    // The cost of calling decryptAADBuf.getDataBuffer() when its buffer is empty
-                    // is significant for 16-byte decrypt operations (approximately a 7%
-                    // performance hit). To avoid this, we reuse the same empty array instead in
-                    // this common-case path.
-                    decryptAADBuf.isEmpty() ? EMPTY_ARRAY : decryptAADBuf.getDataBuffer(),
-                    decryptAADBuf.size()));
-      }
-
-      // We don't have an existing context, however we might want to save one
-      if (saveNativeContext()) {
-        final long[] ptrOut = new long[1];
-        final int outlen =
-            oneShotDecrypt(
-                0,
-                false,
-                ptrOut,
-                workingInputArray,
-                workingInputOffset,
-                workingInputLength,
-                output,
-                outputOffset,
-                tagLength,
-                key,
-                iv,
-
-                // The cost of calling decryptAADBuf.getDataBuffer() when its buffer is empty is
-                // significant for 16-byte decrypt operations (approximately a 7% performance hit).
-                // To avoid this, we reuse the same empty array
-                decryptAADBuf.isEmpty() ? EMPTY_ARRAY : decryptAADBuf.getDataBuffer(),
-                decryptAADBuf.size());
-        context = new NativeEvpCipherCtx(ptrOut[0]);
-        return outlen;
-      }
-      // We don't have a context, and we don't need to save it
-      return oneShotDecrypt(
-          0,
-          false,
+      return decryptWithContext(
           null,
           workingInputArray,
           workingInputOffset,
           workingInputLength,
+          null,
           output,
-          outputOffset,
-          tagLength,
-          key,
-          iv,
-
-          // The cost of calling decryptAADBuf.getDataBuffer() when its buffer is empty is
-          // significant for 16-byte decrypt operations (approximately a 7% performance hit).
-          // To avoid this, we reuse the same empty array
-          decryptAADBuf.isEmpty() ? EMPTY_ARRAY : decryptAADBuf.getDataBuffer(),
-          decryptAADBuf.size());
+          outputOffset);
     } catch (final AEADBadTagException e) {
       final int maxFillSize = output.length - outputOffset;
       final int endIndex = outputOffset + Math.min(maxFillSize, engineGetOutputSize(inputLen));
@@ -797,6 +695,150 @@ final class AesGcmSpi extends CipherSpi {
     } finally {
       stateReset();
     }
+  }
+
+  private int encryptWithContext(
+      final ByteBuffer inputDirect,
+      final byte[] input,
+      final int inputOffset,
+      final int inputLength,
+      final ByteBuffer resultDirect,
+      final byte[] result,
+      final int resultOffset) {
+    if (context != null) {
+      return context.use(
+          ptr ->
+              oneShotEncrypt(
+                  ptr,
+                  sameKey,
+                  null,
+                  inputDirect,
+                  input,
+                  inputOffset,
+                  inputLength,
+                  resultDirect,
+                  result,
+                  resultOffset,
+                  tagLength,
+                  key,
+                  iv));
+    }
+    // We don't have an existing context, however we might want to save one
+    if (saveNativeContext()) {
+      final long[] ptrOut = new long[1];
+      final int outLen =
+          oneShotEncrypt(
+              0,
+              false,
+              ptrOut,
+              inputDirect,
+              input,
+              inputOffset,
+              inputLength,
+              resultDirect,
+              result,
+              resultOffset,
+              tagLength,
+              key,
+              iv);
+      context = new NativeEvpCipherCtx(ptrOut[0]);
+      return outLen;
+    }
+    // We don't need to save the context.
+    return oneShotEncrypt(
+        0,
+        false,
+        null,
+        inputDirect,
+        input,
+        inputOffset,
+        inputLength,
+        resultDirect,
+        result,
+        resultOffset,
+        tagLength,
+        key,
+        iv);
+  }
+
+  private int decryptWithContext(
+      final ByteBuffer inputDirect,
+      final byte[] input,
+      final int inputOffset,
+      final int inputLength,
+      final ByteBuffer resultDirect,
+      final byte[] result,
+      final int resultOffset)
+      throws AEADBadTagException {
+    if (inputLength < tagLength) {
+      throw new AEADBadTagException("Input too short - need tag");
+    }
+    // The cost of calling decryptAADBuf.getDataBuffer() when its buffer is empty is significant for
+    // 16-byte decrypt operations (approximately a 7% performance hit). To avoid this, we reuse the
+    // same empty array instead in this common-case path.
+    final byte[] aad = decryptAADBuf.isEmpty() ? EMPTY_ARRAY : decryptAADBuf.getDataBuffer();
+    final int aadSize = decryptAADBuf.size();
+    if (context != null) {
+      // We already have a context, so let's reuse it.
+      return context.use(
+          ptr ->
+              oneShotDecrypt(
+                  ptr,
+                  sameKey,
+                  null,
+                  inputDirect,
+                  input,
+                  inputOffset,
+                  inputLength,
+                  resultDirect,
+                  result,
+                  resultOffset,
+                  tagLength,
+                  key,
+                  iv,
+                  aad,
+                  aadSize));
+    }
+    // We don't have an existing context, however we might want to save one
+    if (saveNativeContext()) {
+      final long[] ptrOut = new long[1];
+      final int outLen =
+          oneShotDecrypt(
+              0,
+              false,
+              ptrOut,
+              inputDirect,
+              input,
+              inputOffset,
+              inputLength,
+              resultDirect,
+              result,
+              resultOffset,
+              tagLength,
+              key,
+              iv,
+              aad,
+              aadSize);
+      context = new NativeEvpCipherCtx(ptrOut[0]);
+      return outLen;
+    }
+    // We don't have a context, and we don't need to save it
+    return oneShotDecrypt(
+        0,
+        false,
+        null,
+        inputDirect,
+        input,
+        inputOffset,
+        inputLength,
+        resultDirect,
+        result,
+        resultOffset,
+        tagLength,
+        key,
+        iv,
+        aad,
+        aadSize);
   }
 
   @Override
@@ -968,6 +1010,70 @@ final class AesGcmSpi extends CipherSpi {
       default:
         throw new IllegalStateException("Cipher not initialized");
     }
+  }
+
+  /**
+   * Passes the buffers straight to native code, so direct buffers are never copied to the heap.
+   *
+   * <p>Uses the default JCE implementation instead if update() was called first, the output is
+   * read-only, or the output overlaps the input unsafely.
+   */
+  @Override
+  protected int engineDoFinal(final ByteBuffer input, final ByteBuffer output)
+      throws ShortBufferException, IllegalBlockSizeException, BadPaddingException {
+    final boolean updateWasCalled = contextInitialized || !decryptInputBuf.isEmpty();
+    if (updateWasCalled || output.isReadOnly() || Utils.outputClobbersInput(input, output)) {
+      return super.engineDoFinal(input, output);
+    }
+
+    final int inputLength = input.remaining();
+    final int outputSize = engineGetOutputSize(inputLength);
+    if (output.remaining() < outputSize) {
+      throw new ShortBufferException(
+          String.format(
+              "Expected a buffer of at least %d bytes; got %d", outputSize, output.remaining()));
+    }
+
+    final ShimByteBuffer in = new ShimByteBuffer(input, true);
+    final ShimByteBuffer out = new ShimByteBuffer(output, false);
+    final int result;
+    try {
+      final boolean encrypt = opMode == NATIVE_MODE_ENCRYPT;
+      if (encrypt) {
+        checkNeedReset();
+        needReset = true;
+      }
+      result =
+          encrypt
+              ? encryptWithContext(
+                  in.directByteBuffer,
+                  in.array,
+                  in.offset,
+                  inputLength,
+                  out.directByteBuffer,
+                  out.array,
+                  out.offset)
+              : decryptWithContext(
+                  in.directByteBuffer,
+                  in.array,
+                  in.offset,
+                  inputLength,
+                  out.directByteBuffer,
+                  out.array,
+                  out.offset);
+    } catch (final AEADBadTagException e) {
+      final ByteBuffer plaintext = output.duplicate();
+      plaintext.limit(plaintext.position() + Math.min(plaintext.remaining(), outputSize));
+      Utils.zeroByteBuffer(plaintext.slice());
+      throw e;
+    } finally {
+      stateReset();
+    }
+
+    out.writeBack(result);
+    input.position(input.limit());
+    output.position(output.position() + result);
+    return result;
   }
 
   private void checkOutputBuffer(

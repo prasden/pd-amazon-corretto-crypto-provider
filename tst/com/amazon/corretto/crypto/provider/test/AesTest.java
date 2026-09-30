@@ -974,6 +974,181 @@ public class AesTest {
     }
   }
 
+  static List<Arguments> byteBufferDoFinalParams() {
+    final List<Arguments> result = new ArrayList<>();
+    for (final int length : new int[] {0, 1, 16, 4095, 4096, 4097, 300_000}) {
+      for (final boolean inputDirect : new boolean[] {true, false}) {
+        for (final boolean outputDirect : new boolean[] {true, false}) {
+          for (final boolean withAad : new boolean[] {true, false}) {
+            result.add(Arguments.of(length, inputDirect, outputDirect, withAad));
+          }
+        }
+      }
+    }
+    return result;
+  }
+
+  @ParameterizedTest
+  @MethodSource("byteBufferDoFinalParams")
+  public void byteBufferDoFinalMatchesJce(
+      final int length,
+      final boolean inputDirect,
+      final boolean outputDirect,
+      final boolean withAad)
+      throws GeneralSecurityException {
+    final byte[] plaintext = TestUtil.getRandomBytes(length);
+    final byte[] aad = TestUtil.getRandomBytes(32);
+    final GCMParameterSpec spec = new GCMParameterSpec(128, nonce);
+
+    jceC.init(Cipher.ENCRYPT_MODE, key, spec);
+    if (withAad) {
+      jceC.updateAAD(aad);
+    }
+    final byte[] expectedCiphertext = jceC.doFinal(plaintext);
+
+    amznC.init(Cipher.ENCRYPT_MODE, key, spec);
+    if (withAad) {
+      amznC.updateAAD(aad);
+    }
+    final ByteBuffer ptBuf = toBuffer(plaintext, inputDirect);
+    final ByteBuffer ctBuf = allocate(amznC.getOutputSize(length), outputDirect);
+    assertEquals(expectedCiphertext.length, amznC.doFinal(ptBuf, ctBuf));
+    assertFalse(ptBuf.hasRemaining());
+    ctBuf.flip();
+    assertArrayEquals(expectedCiphertext, toArray(ctBuf));
+
+    amznC.init(Cipher.DECRYPT_MODE, key, spec);
+    if (withAad) {
+      amznC.updateAAD(aad);
+    }
+    final ByteBuffer ctIn = toBuffer(expectedCiphertext, inputDirect);
+    final ByteBuffer ptOut = allocate(amznC.getOutputSize(expectedCiphertext.length), outputDirect);
+    assertEquals(length, amznC.doFinal(ctIn, ptOut));
+    assertFalse(ctIn.hasRemaining());
+    ptOut.flip();
+    assertArrayEquals(plaintext, toArray(ptOut));
+  }
+
+  @Test
+  public void byteBufferDoFinalRespectsPositions() throws GeneralSecurityException {
+    final byte[] plaintext = TestUtil.getRandomBytes(1000);
+    final GCMParameterSpec spec = new GCMParameterSpec(128, nonce);
+    jceC.init(Cipher.ENCRYPT_MODE, key, spec);
+    final byte[] expectedCiphertext = jceC.doFinal(plaintext);
+
+    final ByteBuffer input = ByteBuffer.allocateDirect(plaintext.length + 20);
+    input.position(7);
+    input.put(plaintext);
+    input.position(7).limit(7 + plaintext.length);
+    final ByteBuffer output = ByteBuffer.allocateDirect(expectedCiphertext.length + 40);
+    output.position(13);
+
+    amznC.init(Cipher.ENCRYPT_MODE, key, spec);
+    assertEquals(expectedCiphertext.length, amznC.doFinal(input, output));
+    assertEquals(7 + plaintext.length, input.position());
+    assertEquals(13 + expectedCiphertext.length, output.position());
+    output.flip().position(13);
+    assertArrayEquals(expectedCiphertext, toArray(output));
+  }
+
+  @Test
+  public void byteBufferDoFinalInPlaceDirect() throws GeneralSecurityException {
+    final byte[] plaintext = TestUtil.getRandomBytes(5000);
+    final GCMParameterSpec spec = new GCMParameterSpec(128, nonce);
+    jceC.init(Cipher.ENCRYPT_MODE, key, spec);
+    final byte[] ciphertext = jceC.doFinal(plaintext);
+
+    final ByteBuffer shared = ByteBuffer.allocateDirect(ciphertext.length);
+    shared.put(ciphertext).flip();
+    amznC.init(Cipher.DECRYPT_MODE, key, spec);
+    assertEquals(plaintext.length, amznC.doFinal(shared.duplicate(), shared.duplicate()));
+    final byte[] decrypted = new byte[plaintext.length];
+    shared.get(decrypted);
+    assertArrayEquals(plaintext, decrypted);
+  }
+
+  @Test
+  public void byteBufferDoFinalAfterUpdateDirect() throws GeneralSecurityException {
+    final byte[] plaintext = TestUtil.getRandomBytes(10_000);
+    final GCMParameterSpec spec = new GCMParameterSpec(128, nonce);
+    jceC.init(Cipher.ENCRYPT_MODE, key, spec);
+    final byte[] expectedCiphertext = jceC.doFinal(plaintext);
+
+    amznC.init(Cipher.ENCRYPT_MODE, key, spec);
+    final ByteBuffer output = ByteBuffer.allocateDirect(expectedCiphertext.length);
+    amznC.update(toBuffer(Arrays.copyOf(plaintext, 3000), true), output);
+    amznC.doFinal(toBuffer(Arrays.copyOfRange(plaintext, 3000, plaintext.length), true), output);
+    output.flip();
+    assertArrayEquals(expectedCiphertext, toArray(output));
+
+    amznC.init(Cipher.DECRYPT_MODE, key, spec);
+    final ByteBuffer decrypted = ByteBuffer.allocateDirect(plaintext.length);
+    amznC.update(toBuffer(Arrays.copyOf(expectedCiphertext, 3000), true), decrypted);
+    amznC.doFinal(
+        toBuffer(Arrays.copyOfRange(expectedCiphertext, 3000, expectedCiphertext.length), true),
+        decrypted);
+    decrypted.flip();
+    assertArrayEquals(plaintext, toArray(decrypted));
+  }
+
+  @Test
+  public void byteBufferDoFinalShortDirectOutput() throws GeneralSecurityException {
+    final GCMParameterSpec spec = new GCMParameterSpec(128, nonce);
+    amznC.init(Cipher.ENCRYPT_MODE, key, spec);
+    final ByteBuffer input = toBuffer(PLAINTEXT, true);
+    final ByteBuffer output = ByteBuffer.allocateDirect(PLAINTEXT.length);
+    assertThrows(ShortBufferException.class, () -> amznC.doFinal(input, output));
+    assertEquals(0, input.position());
+    assertEquals(0, output.position());
+
+    final ByteBuffer bigEnough = ByteBuffer.allocateDirect(amznC.getOutputSize(PLAINTEXT.length));
+    amznC.doFinal(input, bigEnough);
+    jceC.init(Cipher.ENCRYPT_MODE, key, spec);
+    bigEnough.flip();
+    assertArrayEquals(jceC.doFinal(PLAINTEXT), toArray(bigEnough));
+  }
+
+  @Test
+  public void byteBufferDoFinalBadTagZeroesDirectOutput() throws GeneralSecurityException {
+    final GCMParameterSpec spec = new GCMParameterSpec(128, nonce);
+    jceC.init(Cipher.ENCRYPT_MODE, key, spec);
+    final byte[] ciphertext = jceC.doFinal(PLAINTEXT);
+    ciphertext[ciphertext.length - 1] ^= 1;
+
+    final ByteBuffer output = ByteBuffer.allocateDirect(PLAINTEXT.length + 8);
+    while (output.hasRemaining()) {
+      output.put((byte) 0x5a);
+    }
+    output.position(4).limit(4 + PLAINTEXT.length);
+
+    amznC.init(Cipher.DECRYPT_MODE, key, spec);
+    assertThrows(
+        AEADBadTagException.class, () -> amznC.doFinal(toBuffer(ciphertext, true), output));
+    assertEquals(4, output.position());
+    output.clear();
+    for (int i = 0; i < output.capacity(); i++) {
+      final boolean inPlaintextRange = i >= 4 && i < 4 + PLAINTEXT.length;
+      assertEquals(inPlaintextRange ? 0 : 0x5a, output.get(i) & 0xff, "index " + i);
+    }
+  }
+
+  private static ByteBuffer allocate(final int length, final boolean direct) {
+    return direct ? ByteBuffer.allocateDirect(length) : ByteBuffer.allocate(length);
+  }
+
+  private static ByteBuffer toBuffer(final byte[] data, final boolean direct) {
+    final ByteBuffer buffer = allocate(data.length, direct);
+    buffer.put(data).flip();
+    return buffer;
+  }
+
+  private static byte[] toArray(final ByteBuffer buffer) {
+    final ByteBuffer readable = buffer.duplicate();
+    final byte[] result = new byte[readable.remaining()];
+    readable.get(result);
+    return result;
+  }
+
   @Test
   public void whenCipherReusedWithoutReinit_throwsIVReuseException() throws Throwable {
     final SecureRandom rnd = TestUtil.MISC_SECURE_RANDOM.get();
