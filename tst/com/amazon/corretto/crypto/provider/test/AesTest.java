@@ -1132,6 +1132,57 @@ public class AesTest {
     }
   }
 
+  @Test
+  public void byteBufferDoFinalDirectRejectsIvReuse() throws GeneralSecurityException {
+    amznC.init(Cipher.ENCRYPT_MODE, key, new GCMParameterSpec(128, nonce));
+    amznC.doFinal(
+        toBuffer(PLAINTEXT, true),
+        ByteBuffer.allocateDirect(amznC.getOutputSize(PLAINTEXT.length)));
+    assertThrows(
+        IllegalStateException.class,
+        () ->
+            amznC.doFinal(
+                toBuffer(PLAINTEXT, true),
+                ByteBuffer.allocateDirect(amznC.getOutputSize(PLAINTEXT.length))));
+  }
+
+  @Test
+  public void byteBufferDoFinalDecryptInPlaceAfterIvPrefix() throws GeneralSecurityException {
+    final GCMParameterSpec spec = new GCMParameterSpec(128, nonce);
+    jceC.init(Cipher.ENCRYPT_MODE, key, spec);
+    final byte[] ciphertext = jceC.doFinal(PLAINTEXT);
+
+    final ByteBuffer message = ByteBuffer.allocateDirect(12 + ciphertext.length);
+    message.put(nonce).put(ciphertext).flip();
+    final ByteBuffer input = message.duplicate();
+    input.position(12);
+    final ByteBuffer output = message.duplicate();
+
+    amznC.init(Cipher.DECRYPT_MODE, key, spec);
+    assertEquals(PLAINTEXT.length, amznC.doFinal(input, output));
+    output.flip();
+    assertArrayEquals(PLAINTEXT, toArray(output));
+  }
+
+  @Test
+  public void byteBufferDoFinalEncryptAfterAadDirect() throws GeneralSecurityException {
+    final byte[] aad = TestUtil.getRandomBytes(13);
+    final GCMParameterSpec spec = new GCMParameterSpec(128, nonce);
+    jceC.init(Cipher.ENCRYPT_MODE, key, spec);
+    jceC.updateAAD(aad);
+    final byte[] expected = jceC.doFinal(PLAINTEXT);
+
+    amznC.init(Cipher.ENCRYPT_MODE, key, spec);
+    amznC.updateAAD(aad);
+    final ByteBuffer inPlace = ByteBuffer.allocateDirect(expected.length);
+    inPlace.put(PLAINTEXT).flip();
+    final ByteBuffer inPlaceOutput = inPlace.duplicate();
+    inPlaceOutput.clear();
+    assertEquals(expected.length, amznC.doFinal(inPlace, inPlaceOutput));
+    inPlaceOutput.flip();
+    assertArrayEquals(expected, toArray(inPlaceOutput));
+  }
+
   private static ByteBuffer allocate(final int length, final boolean direct) {
     return direct ? ByteBuffer.allocateDirect(length) : ByteBuffer.allocate(length);
   }

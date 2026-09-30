@@ -59,6 +59,7 @@ final class AesGcmSpi extends CipherSpi {
    * @param resultDirect Result direct buffer; exactly one of resultDirect and result is non-null
    * @param result Result array - must have room for inputLength + tagLen + resultOffset bytes
    * @param resultOffset Offset of start of ciphertext in result array
+   * @param resultLength Space available in the result, starting at resultOffset
    * @param tagLen Length of GCM tag
    * @param key AES key
    * @param iv Initialization vector
@@ -75,6 +76,7 @@ final class AesGcmSpi extends CipherSpi {
       ByteBuffer resultDirect,
       byte[] result,
       int resultOffset,
+      int resultLength,
       int tagLen,
       byte[] key,
       byte[] iv);
@@ -93,6 +95,7 @@ final class AesGcmSpi extends CipherSpi {
    * @param resultDirect Result direct buffer; exactly one of resultDirect and result is non-null
    * @param result Result array - must have room for inputLength + tagLen + resultOffset bytes
    * @param resultOffset Offset of start of ciphertext in result array
+   * @param resultLength Space available in the result, starting at resultOffset
    * @param tagLen Length of GCM tag
    * @param key AES key
    * @param iv Initialization vector
@@ -111,6 +114,7 @@ final class AesGcmSpi extends CipherSpi {
       ByteBuffer resultDirect,
       byte[] result,
       int resultOffset,
+      int resultLength,
       int tagLen,
       byte[] key,
       byte[] iv,
@@ -161,25 +165,32 @@ final class AesGcmSpi extends CipherSpi {
    *
    * @param ptr Native context pointer
    * @param releaseContext if true releases the context
+   * @param inputDirect Input direct buffer; exactly one of inputDirect and bytes is non-null
    * @param bytes Final input data (must not be null, even if no data is to be consumed)
    * @param offset Offset within bytes to start reading
    * @param length Length within bytes to read
+   * @param outputDirect Output direct buffer; exactly one of outputDirect and output is non-null
    * @param output Output buffer
    * @param outputOffset Offset within output buffer to start writing
+   * @param outputLength Space available in the output, starting at outputOffset
    * @param tagLen Length of GCM tag
    * @return Number of bytes written in this final operation
    */
   private static native int encryptDoFinal(
       long ptr,
       boolean releaseContext,
+      ByteBuffer inputDirect,
       byte[] bytes,
       int offset,
       int length,
+      ByteBuffer outputDirect,
       byte[] output,
       int outputOffset,
+      int outputLength,
       int tagLen);
 
   private static final int BLOCK_SIZE = 128 / 8;
+  private static final ByteBuffer EMPTY_BUFFER = ByteBuffer.wrap(EMPTY_ARRAY);
 
   private final AmazonCorrettoCryptoProvider provider;
   private NativeResource context = null;
@@ -588,54 +599,8 @@ final class AesGcmSpi extends CipherSpi {
       checkNeedReset();
 
       this.needReset = true;
-      final byte[] finalInput = input;
-      final int finalInputLength = inputLen;
-      final int finalOutputOffset = outputOffset;
-
-      if (!contextInitialized) {
-        // Context has not been initialized, meaning the user called doFinal immediately after
-        // init(). In this case
-        // we make a single native call to perform the encryption operation in one go.
-
-        return encryptWithContext(
-            null, finalInput, inputOffset, finalInputLength, null, output, finalOutputOffset);
-      }
-      // Context is initialized, which means either updateAAD or update has been invoked after init
-
-      // We need to make sure to add resultLength here; engineUpdate in encrypt mode produces
-      // incremental output (unlike in decrypt mode) and so we need to carry forward whatever
-      // amount of data it produced in our return value.
-      final int finalOutputLen;
-
-      // Should we preserve the context for the next operation?
-      if (saveNativeContext()) {
-        finalOutputLen =
-            context.use(
-                ptr ->
-                    encryptDoFinal(
-                        ptr,
-                        false, // releaseContext
-                        finalInput,
-                        inputOffset,
-                        finalInputLength,
-                        output,
-                        finalOutputOffset,
-                        tagLength));
-      } else {
-        finalOutputLen =
-            encryptDoFinal(
-                context.take(),
-                true, // releaseContext
-                input,
-                inputOffset,
-                finalInputLength,
-                output,
-                finalOutputOffset,
-                tagLength);
-        context = null;
-      }
-
-      return resultLength + finalOutputLen;
+      return resultLength
+          + encryptWithContext(null, input, inputOffset, inputLen, null, output, outputOffset);
     } finally {
       stateReset();
     }
@@ -705,6 +670,41 @@ final class AesGcmSpi extends CipherSpi {
       final ByteBuffer resultDirect,
       final byte[] result,
       final int resultOffset) {
+    final int resultLength = remaining(resultDirect, result, resultOffset);
+    if (contextInitialized) {
+      // update or updateAAD already started the native operation, so finish it.
+      if (saveNativeContext()) {
+        return context.use(
+            ptr ->
+                encryptDoFinal(
+                    ptr,
+                    false, // releaseContext
+                    inputDirect,
+                    input,
+                    inputOffset,
+                    inputLength,
+                    resultDirect,
+                    result,
+                    resultOffset,
+                    resultLength,
+                    tagLength));
+      }
+      final int outLen =
+          encryptDoFinal(
+              context.take(),
+              true, // releaseContext
+              inputDirect,
+              input,
+              inputOffset,
+              inputLength,
+              resultDirect,
+              result,
+              resultOffset,
+              resultLength,
+              tagLength);
+      context = null;
+      return outLen;
+    }
     if (context != null) {
       return context.use(
           ptr ->
@@ -719,46 +719,36 @@ final class AesGcmSpi extends CipherSpi {
                   resultDirect,
                   result,
                   resultOffset,
+                  resultLength,
                   tagLength,
                   key,
                   iv));
     }
     // We don't have an existing context, however we might want to save one
+    long[] ptrOut = null;
     if (saveNativeContext()) {
-      final long[] ptrOut = new long[1];
-      final int outLen =
-          oneShotEncrypt(
-              0,
-              false,
-              ptrOut,
-              inputDirect,
-              input,
-              inputOffset,
-              inputLength,
-              resultDirect,
-              result,
-              resultOffset,
-              tagLength,
-              key,
-              iv);
-      context = new NativeEvpCipherCtx(ptrOut[0]);
-      return outLen;
+      ptrOut = new long[1];
     }
-    // We don't need to save the context.
-    return oneShotEncrypt(
-        0,
-        false,
-        null,
-        inputDirect,
-        input,
-        inputOffset,
-        inputLength,
-        resultDirect,
-        result,
-        resultOffset,
-        tagLength,
-        key,
-        iv);
+    final int outLen =
+        oneShotEncrypt(
+            0,
+            false,
+            ptrOut,
+            inputDirect,
+            input,
+            inputOffset,
+            inputLength,
+            resultDirect,
+            result,
+            resultOffset,
+            resultLength,
+            tagLength,
+            key,
+            iv);
+    if (ptrOut != null) {
+      context = new NativeEvpCipherCtx(ptrOut[0]);
+    }
+    return outLen;
   }
 
   private int decryptWithContext(
@@ -773,6 +763,7 @@ final class AesGcmSpi extends CipherSpi {
     if (inputLength < tagLength) {
       throw new AEADBadTagException("Input too short - need tag");
     }
+    final int resultLength = remaining(resultDirect, result, resultOffset);
     // The cost of calling decryptAADBuf.getDataBuffer() when its buffer is empty is significant for
     // 16-byte decrypt operations (approximately a 7% performance hit). To avoid this, we reuse the
     // same empty array instead in this common-case path.
@@ -793,6 +784,7 @@ final class AesGcmSpi extends CipherSpi {
                   resultDirect,
                   result,
                   resultOffset,
+                  resultLength,
                   tagLength,
                   key,
                   iv,
@@ -800,45 +792,39 @@ final class AesGcmSpi extends CipherSpi {
                   aadSize));
     }
     // We don't have an existing context, however we might want to save one
+    long[] ptrOut = null;
     if (saveNativeContext()) {
-      final long[] ptrOut = new long[1];
-      final int outLen =
-          oneShotDecrypt(
-              0,
-              false,
-              ptrOut,
-              inputDirect,
-              input,
-              inputOffset,
-              inputLength,
-              resultDirect,
-              result,
-              resultOffset,
-              tagLength,
-              key,
-              iv,
-              aad,
-              aadSize);
-      context = new NativeEvpCipherCtx(ptrOut[0]);
-      return outLen;
+      ptrOut = new long[1];
     }
-    // We don't have a context, and we don't need to save it
-    return oneShotDecrypt(
-        0,
-        false,
-        null,
-        inputDirect,
-        input,
-        inputOffset,
-        inputLength,
-        resultDirect,
-        result,
-        resultOffset,
-        tagLength,
-        key,
-        iv,
-        aad,
-        aadSize);
+    final int outLen =
+        oneShotDecrypt(
+            0,
+            false,
+            ptrOut,
+            inputDirect,
+            input,
+            inputOffset,
+            inputLength,
+            resultDirect,
+            result,
+            resultOffset,
+            resultLength,
+            tagLength,
+            key,
+            iv,
+            aad,
+            aadSize);
+    if (ptrOut != null) {
+      context = new NativeEvpCipherCtx(ptrOut[0]);
+    }
+    return outLen;
+  }
+
+  private static int remaining(final ByteBuffer direct, final byte[] array, final int offset) {
+    if (direct != null) {
+      return direct.remaining();
+    }
+    return array.length - offset;
   }
 
   @Override
@@ -1015,14 +1001,14 @@ final class AesGcmSpi extends CipherSpi {
   /**
    * Passes the buffers straight to native code, so direct buffers are never copied to the heap.
    *
-   * <p>Uses the default JCE implementation instead if update() was called first, the output is
-   * read-only, or the output overlaps the input unsafely.
+   * <p>Uses the default JCE implementation instead if decrypt update() already buffered ciphertext,
+   * or if the output overlaps the input unsafely.
    */
   @Override
   protected int engineDoFinal(final ByteBuffer input, final ByteBuffer output)
       throws ShortBufferException, IllegalBlockSizeException, BadPaddingException {
-    final boolean updateWasCalled = contextInitialized || !decryptInputBuf.isEmpty();
-    if (updateWasCalled || output.isReadOnly() || Utils.outputClobbersInput(input, output)) {
+    final boolean ciphertextIsBuffered = !decryptInputBuf.isEmpty();
+    if (ciphertextIsBuffered || Utils.outputClobbersInput(input, output)) {
       return super.engineDoFinal(input, output);
     }
 
@@ -1034,8 +1020,8 @@ final class AesGcmSpi extends CipherSpi {
               "Expected a buffer of at least %d bytes; got %d", outputSize, output.remaining()));
     }
 
-    final ShimByteBuffer in = new ShimByteBuffer(input, true);
-    final ShimByteBuffer out = new ShimByteBuffer(output, false);
+    final ShimByteBuffer in = new ShimByteBuffer(nonEmpty(input), true);
+    final ShimByteBuffer out = new ShimByteBuffer(nonEmpty(output), false);
     final int result;
     try {
       final boolean encrypt = opMode == NATIVE_MODE_ENCRYPT;
@@ -1074,6 +1060,16 @@ final class AesGcmSpi extends CipherSpi {
     input.position(input.limit());
     output.position(output.position() + result);
     return result;
+  }
+
+  // Map an empty buffer to a heap buffer, because JNI returns no address for some empty direct
+  // buffers.
+  // Example: FileChannel.map(READ_ONLY, 0, 0) has a null native address.
+  private static ByteBuffer nonEmpty(final ByteBuffer buffer) {
+    if (buffer.hasRemaining()) {
+      return buffer;
+    }
+    return EMPTY_BUFFER;
   }
 
   private void checkOutputBuffer(

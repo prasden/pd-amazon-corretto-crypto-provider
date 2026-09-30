@@ -114,6 +114,29 @@ public class UtilsTest {
   }
 
   @Test
+  public void whenDirectBuffersOverlap_correctClobber() throws Throwable {
+    ByteBuffer a = ByteBuffer.allocateDirect(100);
+    ByteBuffer b = a.duplicate();
+
+    // Exact overlap
+    assertNoClobber(a, b);
+
+    // Output clobbers
+    b.position(10);
+    assertOutputClobbers(a, b);
+
+    // Output leads, but is beyond the input limit
+    a.limit(10);
+    assertNoClobber(a, b);
+
+    // Output lags
+    a.limit(a.capacity());
+    a.position(12);
+    b.position(0);
+    assertNoClobber(a, b);
+  }
+
+  @Test
   public void whenOneBufferIsReadOnly_assumesClobber() throws Throwable {
     ByteBuffer a = ByteBuffer.allocate(100);
     ByteBuffer b = ByteBuffer.allocate(100).asReadOnlyBuffer();
@@ -158,7 +181,7 @@ public class UtilsTest {
 
     a.limit(a.capacity());
     a.position(b.position());
-    assertOutputClobbers(a, b);
+    assertNoClobber(a, b);
   }
 
   @Test

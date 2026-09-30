@@ -214,12 +214,6 @@ public:
                              : from_array(context, array, offset, length);
     }
 
-    static java_buffer from(raii_env& context, jobject direct_buffer, jbyteArray array, jint offset)
-    {
-        return direct_buffer ? from_direct(context, direct_buffer).subrange(offset)
-                             : from_array(context, array, offset);
-    }
-
     /**
      * Returns the length, in bytes, of the data represented by this java_buffer.
      */
