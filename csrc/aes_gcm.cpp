@@ -202,8 +202,11 @@ JNIEXPORT int JNICALL Java_com_amazon_corretto_crypto_provider_AesGcmSpi_oneShot
 
         initializeContext(env, ctxPtr, ctx, sameKey, keyArray, ivArray, NATIVE_MODE_ENCRYPT);
 
-        java_buffer input = java_buffer::from(env, inputDirect, inputArray, inoffset, inlen);
-        java_buffer result = java_buffer::from(env, resultDirect, resultArray, resultOffset, resultLength);
+        java_buffer input = inputDirect ? java_buffer::from_direct(env, inputDirect).subrange(inoffset, inlen)
+                            : java_buffer::from_array(env, inputArray, inoffset, inlen);
+        java_buffer result = resultDirect
+            ? java_buffer::from_direct(env, resultDirect).subrange(resultOffset, resultLength)
+            : java_buffer::from_array(env, resultArray, resultOffset, resultLength);
 
         int outoffset = updateLoop(env, result, input, ctx);
         if (outoffset < 0)
@@ -326,8 +329,11 @@ JNIEXPORT jint JNICALL Java_com_amazon_corretto_crypto_provider_AesGcmSpi_encryp
 
         raii_env env(pEnv);
 
-        java_buffer input = java_buffer::from(env, inputDirect, inputArray, inoffset, inlength);
-        java_buffer result = java_buffer::from(env, resultDirect, resultArray, resultOffset, resultLength);
+        java_buffer input = inputDirect ? java_buffer::from_direct(env, inputDirect).subrange(inoffset, inlength)
+                            : java_buffer::from_array(env, inputArray, inoffset, inlength);
+        java_buffer result = resultDirect
+            ? java_buffer::from_direct(env, resultDirect).subrange(resultOffset, resultLength)
+            : java_buffer::from_array(env, resultArray, resultOffset, resultLength);
 
         int outoffset = updateLoop(env, result, input, ctx);
         result = result.subrange(outoffset);
@@ -371,8 +377,11 @@ JNIEXPORT jint JNICALL Java_com_amazon_corretto_crypto_provider_AesGcmSpi_oneSho
 
         initializeContext(env, ctxPtr, ctx, sameKey, keyArray, ivArray, NATIVE_MODE_DECRYPT);
 
-        java_buffer input = java_buffer::from(env, inputDirect, inputArray, inoffset, inlen);
-        java_buffer result = java_buffer::from(env, resultDirect, resultArray, resultOffset, resultLength);
+        java_buffer input = inputDirect ? java_buffer::from_direct(env, inputDirect).subrange(inoffset, inlen)
+                            : java_buffer::from_array(env, inputArray, inoffset, inlen);
+        java_buffer result = resultDirect
+            ? java_buffer::from_direct(env, resultDirect).subrange(resultOffset, resultLength)
+            : java_buffer::from_array(env, resultArray, resultOffset, resultLength);
 
         // Decrypt mode: Set the tag before we decrypt
         if (unlikely(tagLen > 16 || tagLen < 0)) {
